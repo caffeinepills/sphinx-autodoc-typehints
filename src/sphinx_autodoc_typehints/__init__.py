@@ -27,7 +27,7 @@ from .version import __version__
 if TYPE_CHECKING:
     from ast import FunctionDef, Module, stmt
 
-    from docutils.nodes import Node
+    from docutils.nodes import Node, document
     from docutils.parsers.rst import states
     from sphinx.application import Sphinx
     from sphinx.config import Config
@@ -774,7 +774,7 @@ class InsertIndexInfo:
 PARAM_SYNONYMS = ("param ", "parameter ", "arg ", "argument ", "keyword ", "kwarg ", "kwparam ")
 
 
-def node_line_no(node: Node) -> int | None:
+def node_line_no(doc: document, node: Node) -> int | None:
     """
     Get the 1-indexed line on which the node starts if possible. If not, return None.
 
@@ -784,9 +784,26 @@ def node_line_no(node: Node) -> int | None:
     docutils rst parser source code. An example where the node doesn't have a line number but the first child does is
     all `definition_list` nodes. It seems like bullet_list and option_list get line numbers, but enum_list also doesn't.
     """
-    while node.line is None and node.children:
-        node = node.children[0]
-    return node.line
+    if node is None:
+        return None
+
+    # Traverse the document tree to find the node and calculate its line number
+    current_node = doc
+    line_no = 0
+    while current_node is not None:
+        # If the current node is the one we're looking for, return the calculated line number
+        if current_node == node:
+            return line_no
+        # If the current node is a Text node, increment the line number by the number of lines in the text
+        if isinstance(current_node, nodes.Text):
+            line_no += current_node.astext().count('\n')
+        # Increment the line number by 1 for the current node
+        line_no += 1
+        # Move to the next node
+        current_node = current_node.next_node(descend=True)
+
+    # Node not found.
+    return None
 
 
 def tag_name(node: Node) -> str:
@@ -813,6 +830,7 @@ def get_insert_index(app: Sphinx, lines: list[str]) -> InsertIndexInfo | None:
     # Find a top level child which is a field_list that contains a field whose
     # name starts with one of the PARAM_SYNONYMS. This is the parameter list. We
     # hope there is at most of these.
+    insert_index_info = None
     for child in doc.children:
         if tag_name(child) != "field_list":
             continue
@@ -825,20 +843,27 @@ def get_insert_index(app: Sphinx, lines: list[str]) -> InsertIndexInfo | None:
         # If there is a next sibling but we can't locate a line number, insert
         # at end. (I don't know of any input where this happens.)
         next_sibling = child.next_node(descend=False, siblings=True)
-        line_no = node_line_no(next_sibling) if next_sibling else None
+        line_no = node_line_no(doc, next_sibling)
         at = line_no - 2 if line_no else len(lines)
-        return InsertIndexInfo(insert_index=at, found_param=True)
+        insert_index_info = InsertIndexInfo(insert_index=at, found_param=True)
+        break  # Stop searching once we've found the parameter list
 
-    # 4. Insert before examples
-    for child in doc.children:
-        if tag_name(child) in {"literal_block", "paragraph", "field_list"}:
-            continue
-        line_no = node_line_no(child)
-        at = line_no - 2 if line_no else len(lines)
-        return InsertIndexInfo(insert_index=at, found_directive=True)
+    # If we couldn't find the parameters, continue searching for other insertion points
+    if not insert_index_info:
+        # 4. Insert before examples
+        for child in doc.children:
+            if tag_name(child) in {"literal_block", "paragraph", "field_list"}:
+                continue
+            line_no = node_line_no(doc, child)
+            at = line_no - 2 if line_no else len(lines)
+            insert_index_info = InsertIndexInfo(insert_index=at, found_directive=True)
+            break  # Stop searching once we've found the insertion point before examples
 
-    # 5. Otherwise, insert at end
-    return InsertIndexInfo(insert_index=len(lines))
+    # 5. If no specific insertion points found, insert at the end
+    if not insert_index_info:
+        insert_index_info = InsertIndexInfo(insert_index=len(lines))
+
+    return insert_index_info
 
 
 def _inject_rtype(  # noqa: PLR0913, PLR0917
